@@ -8,16 +8,18 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
+	smithyendpoints "github.com/aws/smithy-go/endpoints"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/bradfitz/go-tool-cache/cacheproc"
 	"github.com/bradfitz/go-tool-cache/cachers"
@@ -31,9 +33,10 @@ const (
 	envVarDiskCacheDir = "GOCACHE_DISK_DIR"
 
 	// S3 cache
+	envVarS3Endpoint           = "GOCACHE_S3_ENDPOINT"
 	envVarS3CacheRegion        = "GOCACHE_AWS_REGION"
 	envVarS3AwsAccessKey       = "GOCACHE_AWS_ACCESS_KEY"
-	envVarS3AwsSecretAccessKey = "GOCACHE_AWS_SECRET_ACCESS_KEY"
+	envVarS3AwsSecretAccessKey = "GOCACHE_AWS_SECRET_KEY"
 	envVarS3AwsCredsProfile    = "GOCACHE_AWS_CREDS_PROFILE"
 	envVarS3BucketName         = "GOCACHE_S3_BUCKET"
 	envVarS3CacheKey           = "GOCACHE_CACHE_KEY"
@@ -76,6 +79,10 @@ func getAwsConfigFromEnv(ctx context.Context, env Env) (*aws.Config, error) {
 		if err != nil {
 			return nil, err
 		}
+		endpoint := env.Get(envVarS3Endpoint)
+		if endpoint != "" {
+			cfg.BaseEndpoint = &endpoint
+		}
 		return &cfg, nil
 	}
 	credsProfile := env.Get(envVarS3AwsCredsProfile)
@@ -87,6 +94,29 @@ func getAwsConfigFromEnv(ctx context.Context, env Env) (*aws.Config, error) {
 		return &cfg, nil
 	}
 	return nil, nil
+}
+
+type resolver struct {
+	endpoint string
+}
+
+func (*resolver) ResolveEndpoint(_ context.Context, params s3.EndpointParameters) (
+	smithyendpoints.Endpoint, error,
+) {
+	url := fmt.Sprintf("%s/%s", *params.Endpoint, *params.Bucket)
+	u, err := neturl.Parse(url)
+	if err != nil {
+		return smithyendpoints.Endpoint{}, err
+	}
+	if params.Region != nil {
+		q := u.Query()
+		q.Set("region", *params.Region)
+		u.RawQuery = q.Encode()
+	}
+
+	return smithyendpoints.Endpoint{
+		URI: *u,
+	}, nil
 }
 
 func maybeS3Cache(ctx context.Context, env Env) (cachers.RemoteCache, error) {
@@ -103,7 +133,8 @@ func maybeS3Cache(ctx context.Context, env Env) (cachers.RemoteCache, error) {
 	if cacheKey == "" {
 		cacheKey = defaultCacheKey
 	}
-	s3Client := s3.NewFromConfig(*awsConfig)
+
+	s3Client := s3.NewFromConfig(*awsConfig, s3.WithEndpointResolverV2(&resolver{}))
 	s3Cache := cachers.NewS3Cache(s3Client, bucket, cacheKey, *verbose)
 	return s3Cache, nil
 }
